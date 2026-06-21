@@ -115,122 +115,13 @@ impl Phase {
             .to_owned();
         env = format!("%scriptBase\n{env}\n");
 
-        let mut parser = script::Parser::new().env(env);
+        let parser = script::Parser::new().env(env);
 
-        let build_target = target.to_string();
-        let build_dir = paths.build().guest.join(&build_target);
-        let work_dir = if matches!(self, Phase::Prepare) {
-            build_dir.clone()
-        } else {
-            work_dir(&build_dir, &recipe.parsed.upstreams)
-        };
-        let num_jobs = util::num_cpus();
+        let mut context = script::ScriptContext::new();
 
-        for arch in ["base", &build_target] {
-            let macros = macros
-                .arch
-                .get(arch)
-                .cloned()
-                .ok_or_else(|| Error::MissingArchMacros(arch.to_owned()))?;
+        prepare_context(&mut context, &self, target, pgo_stage, recipe, paths, macros, ccache)?;
 
-            parser.add_macros(macros.clone());
-        }
-
-        for macros in macros.actions.clone() {
-            parser.add_macros(macros.clone());
-        }
-
-        parser.add_definition("name", &recipe.parsed.source.name);
-        parser.add_definition("version", &recipe.parsed.source.version);
-        parser.add_definition("release", recipe.parsed.source.release);
-        parser.add_definition("jobs", num_jobs);
-        parser.add_definition("pkgdir", paths.recipe().guest.join("pkg").display());
-        parser.add_definition("sourcedir", paths.upstreams().guest.display());
-        parser.add_definition("installroot", paths.install().guest.display());
-        parser.add_definition("buildroot", build_dir.display());
-        parser.add_definition("workdir", work_dir.display());
-
-        parser.add_definition("compiler_cache", "/mason/ccache");
-        parser.add_definition("scompiler_cache", "/mason/sccache");
-
-        parser.add_definition("sourcedateepoch", recipe.build_time.timestamp());
-
-        let path = if ccache {
-            "/usr/lib/ccache/bin:/usr/bin:/bin"
-        } else {
-            "/usr/bin:/bin"
-        };
-
-        if ccache {
-            parser.add_definition("compiler_go_cache", "/mason/gocache");
-            parser.add_definition("compiler_go_mod_cache", "/mason/gomodcache");
-            parser.add_definition("compiler_cargo_cache", "/mason/cargocache");
-            parser.add_definition("compiler_zig_cache", "/mason/zigcache");
-            parser.add_definition("rustc_wrapper", "/usr/bin/sccache");
-        } else {
-            parser.add_definition("compiler_go_cache", "");
-            parser.add_definition("compiler_go_mod_cache", "");
-            parser.add_definition("compiler_cargo_cache", "");
-            parser.add_definition("compiler_zig_cache", "");
-            parser.add_definition("rustc_wrapper", "");
-        }
-
-        /* Set the relevant compilers */
-        if matches!(recipe.parsed.options.toolchain, Toolchain::Llvm) {
-            parser.add_definition("compiler_c", "clang");
-            parser.add_definition("compiler_cxx", "clang++");
-            parser.add_definition("compiler_objc", "clang");
-            parser.add_definition("compiler_objcxx", "clang++");
-            parser.add_definition("compiler_cpp", "clang-cpp");
-            parser.add_definition("compiler_objcpp", "clang -E -");
-            parser.add_definition("compiler_objcxxcpp", "clang++ -E");
-            parser.add_definition("compiler_d", "ldc2");
-            parser.add_definition("compiler_ar", "llvm-ar");
-            parser.add_definition("compiler_objcopy", "llvm-objcopy");
-            parser.add_definition("compiler_nm", "llvm-nm");
-            parser.add_definition("compiler_ranlib", "llvm-ranlib");
-            parser.add_definition("compiler_strip", "llvm-strip");
-        } else {
-            parser.add_definition("compiler_c", "gcc");
-            parser.add_definition("compiler_cxx", "g++");
-            parser.add_definition("compiler_objc", "gcc");
-            parser.add_definition("compiler_objcxx", "g++");
-            parser.add_definition("compiler_cpp", "gcc -E");
-            parser.add_definition("compiler_objcpp", "gcc -E");
-            parser.add_definition("compiler_objcxxcpp", "g++ -E");
-            parser.add_definition("compiler_d", "ldc2"); // FIXME: GDC
-            parser.add_definition("compiler_ar", "gcc-ar");
-            parser.add_definition("compiler_objcopy", "objcopy");
-            parser.add_definition("compiler_nm", "gcc-nm");
-            parser.add_definition("compiler_ranlib", "gcc-ranlib");
-            parser.add_definition("compiler_strip", "strip");
-        }
-        parser.add_definition("compiler_path", path);
-
-        if recipe.parsed.mold {
-            parser.add_definition("compiler_ld", "ld.mold");
-        } else if matches!(recipe.parsed.options.toolchain, Toolchain::Llvm) {
-            parser.add_definition("compiler_ld", "ld.lld");
-        } else {
-            parser.add_definition("compiler_ld", "ld.bfd");
-        }
-
-        /* Allow packagers to do stage specific actions in a pgo build */
-        if matches!(pgo_stage, Some(pgo::Stage::One)) {
-            parser.add_definition("pgo_stage", "ONE");
-        } else if matches!(pgo_stage, Some(pgo::Stage::Two)) {
-            parser.add_definition("pgo_stage", "TWO");
-        } else if matches!(pgo_stage, Some(pgo::Stage::Use)) {
-            parser.add_definition("pgo_stage", "USE");
-        } else {
-            parser.add_definition("pgo_stage", "NONE");
-        }
-
-        parser.add_definition("pgo_dir", format!("{}-pgo", build_dir.display()));
-
-        add_tuning(target, pgo_stage, recipe, macros, &mut parser)?;
-
-        Ok(Some(parser.parse(&content)?))
+        Ok(Some(parser.parse(&context, &content)?))
     }
 }
 
@@ -289,7 +180,7 @@ fn add_tuning(
     pgo_stage: Option<pgo::Stage>,
     recipe: &Recipe,
     macros: &Macros,
-    parser: &mut script::Parser,
+    context: &mut script::ScriptContext,
 ) -> Result<(), Error> {
     let mut tuning = tuning::Builder::new();
 
@@ -398,14 +289,14 @@ fn add_tuning(
         rustflags.push_str(" -Clink-arg=-fuse-ld=mold");
     }
 
-    parser.add_definition("cflags", cflags);
-    parser.add_definition("cxxflags", cxxflags);
-    parser.add_definition("fflags", fflags);
-    parser.add_definition("ldflags", ldflags);
-    parser.add_definition("dflags", dflags);
-    parser.add_definition("rustflags", rustflags);
-    parser.add_definition("valaflags", valaflags);
-    parser.add_definition("goflags", goflags);
+    context.add_definition("cflags", cflags);
+    context.add_definition("cxxflags", cxxflags);
+    context.add_definition("fflags", fflags);
+    context.add_definition("ldflags", ldflags);
+    context.add_definition("dflags", dflags);
+    context.add_definition("rustflags", rustflags);
+    context.add_definition("valaflags", valaflags);
+    context.add_definition("goflags", goflags);
 
     Ok(())
 }
@@ -426,4 +317,130 @@ fn default_tuning_groups(target: BuildTarget, macros: &Macros) -> &[String] {
     }
 
     &[]
+}
+
+fn prepare_context(
+    context: &mut script::ScriptContext,
+    phase: &Phase,
+    target: BuildTarget,
+    pgo_stage: Option<pgo::Stage>,
+    recipe: &Recipe,
+    paths: &Paths,
+    macros: &Macros,
+    ccache: bool,
+) -> Result<(), Error> {
+    let build_target = target.to_string();
+    let build_dir = paths.build().guest.join(&build_target);
+    let work_dir = if matches!(phase, Phase::Prepare) {
+        build_dir.clone()
+    } else {
+        work_dir(&build_dir, &recipe.parsed.upstreams)
+    };
+    let num_jobs = util::num_cpus();
+
+    for arch in ["base", &build_target] {
+        let macros = macros
+            .arch
+            .get(arch)
+            .cloned()
+            .ok_or_else(|| Error::MissingArchMacros(arch.to_owned()))?;
+
+        context.add_macros(macros.clone());
+    }
+
+    for macros in macros.actions.clone() {
+        context.add_macros(macros.clone());
+    }
+
+    context.add_definition("name", &recipe.parsed.source.name);
+    context.add_definition("version", &recipe.parsed.source.version);
+    context.add_definition("release", recipe.parsed.source.release);
+    context.add_definition("jobs", num_jobs);
+    context.add_definition("pkgdir", paths.recipe().guest.join("pkg").display());
+    context.add_definition("sourcedir", paths.upstreams().guest.display());
+    context.add_definition("installroot", paths.install().guest.display());
+    context.add_definition("buildroot", build_dir.display());
+    context.add_definition("workdir", work_dir.display());
+
+    context.add_definition("compiler_cache", "/mason/ccache");
+    context.add_definition("scompiler_cache", "/mason/sccache");
+
+    context.add_definition("sourcedateepoch", recipe.build_time.timestamp());
+
+    let path = if ccache {
+        "/usr/lib/ccache/bin:/usr/bin:/bin"
+    } else {
+        "/usr/bin:/bin"
+    };
+
+    if ccache {
+        context.add_definition("compiler_go_cache", "/mason/gocache");
+        context.add_definition("compiler_go_mod_cache", "/mason/gomodcache");
+        context.add_definition("compiler_cargo_cache", "/mason/cargocache");
+        context.add_definition("compiler_zig_cache", "/mason/zigcache");
+        context.add_definition("rustc_wrapper", "/usr/bin/sccache");
+    } else {
+        context.add_definition("compiler_go_cache", "");
+        context.add_definition("compiler_go_mod_cache", "");
+        context.add_definition("compiler_cargo_cache", "");
+        context.add_definition("compiler_zig_cache", "");
+        context.add_definition("rustc_wrapper", "");
+    }
+
+    /* Set the relevant compilers */
+    if matches!(recipe.parsed.options.toolchain, Toolchain::Llvm) {
+        context.add_definition("compiler_c", "clang");
+        context.add_definition("compiler_cxx", "clang++");
+        context.add_definition("compiler_objc", "clang");
+        context.add_definition("compiler_objcxx", "clang++");
+        context.add_definition("compiler_cpp", "clang-cpp");
+        context.add_definition("compiler_objcpp", "clang -E -");
+        context.add_definition("compiler_objcxxcpp", "clang++ -E");
+        context.add_definition("compiler_d", "ldc2");
+        context.add_definition("compiler_ar", "llvm-ar");
+        context.add_definition("compiler_objcopy", "llvm-objcopy");
+        context.add_definition("compiler_nm", "llvm-nm");
+        context.add_definition("compiler_ranlib", "llvm-ranlib");
+        context.add_definition("compiler_strip", "llvm-strip");
+    } else {
+        context.add_definition("compiler_c", "gcc");
+        context.add_definition("compiler_cxx", "g++");
+        context.add_definition("compiler_objc", "gcc");
+        context.add_definition("compiler_objcxx", "g++");
+        context.add_definition("compiler_cpp", "gcc -E");
+        context.add_definition("compiler_objcpp", "gcc -E");
+        context.add_definition("compiler_objcxxcpp", "g++ -E");
+        context.add_definition("compiler_d", "ldc2"); // FIXME: GDC
+        context.add_definition("compiler_ar", "gcc-ar");
+        context.add_definition("compiler_objcopy", "objcopy");
+        context.add_definition("compiler_nm", "gcc-nm");
+        context.add_definition("compiler_ranlib", "gcc-ranlib");
+        context.add_definition("compiler_strip", "strip");
+    }
+    context.add_definition("compiler_path", path);
+
+    if recipe.parsed.mold {
+        context.add_definition("compiler_ld", "ld.mold");
+    } else if matches!(recipe.parsed.options.toolchain, Toolchain::Llvm) {
+        context.add_definition("compiler_ld", "ld.lld");
+    } else {
+        context.add_definition("compiler_ld", "ld.bfd");
+    }
+
+    /* Allow packagers to do stage specific actions in a pgo build */
+    if matches!(pgo_stage, Some(pgo::Stage::One)) {
+        context.add_definition("pgo_stage", "ONE");
+    } else if matches!(pgo_stage, Some(pgo::Stage::Two)) {
+        context.add_definition("pgo_stage", "TWO");
+    } else if matches!(pgo_stage, Some(pgo::Stage::Use)) {
+        context.add_definition("pgo_stage", "USE");
+    } else {
+        context.add_definition("pgo_stage", "NONE");
+    }
+
+    context.add_definition("pgo_dir", format!("{}-pgo", build_dir.display()));
+
+    add_tuning(target, pgo_stage, recipe, macros, context)?;
+
+    Ok(())
 }

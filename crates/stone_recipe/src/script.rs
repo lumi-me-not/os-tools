@@ -17,24 +17,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{Macros, macros::Action};
 
 #[derive(Default)]
-pub struct Parser {
+pub struct ScriptContext {
     actions: BTreeMap<String, Action>,
     definitions: BTreeMap<String, String>,
-    env: Option<String>,
 }
 
-impl Parser {
+impl ScriptContext {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Env is parsed and prependend to the beginning of each
-    /// [`Command::Content`]
-    pub fn env(self, env: impl ToString) -> Self {
-        Self {
-            env: Some(env.to_string()),
-            ..self
-        }
     }
 
     pub fn add_action(&mut self, identifier: impl ToString, action: Action) {
@@ -53,35 +43,60 @@ impl Parser {
             self.add_definition(kv.key, kv.value);
         }
     }
+}
 
-    pub fn parse(&self, input: &str) -> Result<Script, Error> {
+#[derive(Default)]
+pub struct Parser {
+    env: Option<String>,
+}
+
+impl Parser {
+    pub fn new() -> Self {
+        Self { ..Self::default() }
+    }
+
+    /// Env is parsed and prependend to the beginning of each
+    /// [`Command::Content`]
+    pub fn env(self, env: impl ToString) -> Self {
+        Self {
+            env: Some(env.to_string()),
+            ..self
+        }
+    }
+
+    pub fn parse(&self, context: &ScriptContext, input: &str) -> Result<Script, Error> {
         let mut dependencies = BTreeSet::new();
 
         let Parsed { commands, env } = parse(
             input,
             self.env.as_deref(),
-            &self.actions,
-            &self.definitions,
+            &context.actions,
+            &context.definitions,
             &mut dependencies,
         )?;
 
-        let resolved_actions = self
+        let resolved_actions = context
             .actions
             .iter()
             .filter_map(|(identifier, action)| {
-                let result =
-                    parse_content_only(&action.command, &self.actions, &self.definitions, &mut BTreeSet::new())
-                        .transpose()?;
+                let result = parse_content_only(
+                    &action.command,
+                    &context.actions,
+                    &context.definitions,
+                    &mut BTreeSet::new(),
+                )
+                .transpose()?;
 
                 Some(result.map(|resolved| (identifier.clone(), resolved)))
             })
             .collect::<Result<_, _>>()?;
-        let resolved_definitions = self
+        let resolved_definitions = context
             .definitions
             .iter()
             .filter_map(|(identifier, definition)| {
-                let result = parse_content_only(definition, &self.actions, &self.definitions, &mut BTreeSet::new())
-                    .transpose()?;
+                let result =
+                    parse_content_only(definition, &context.actions, &context.definitions, &mut BTreeSet::new())
+                        .transpose()?;
 
                 Some(result.map(|resolved| (identifier.clone(), resolved)))
             })
@@ -96,8 +111,8 @@ impl Parser {
         })
     }
 
-    pub fn parse_content(&self, input: &str) -> Result<String, Error> {
-        parse_content_only(input, &self.actions, &self.definitions, &mut Default::default())
+    pub fn parse_content(&self, context: &ScriptContext, input: &str) -> Result<String, Error> {
+        parse_content_only(input, &context.actions, &context.definitions, &mut Default::default())
             .map(Option::unwrap_or_default)
     }
 }
@@ -295,8 +310,9 @@ mod test {
     fn parse_script() {
         let input = "\n\n%patch %%escaped %{ %break_continue\n%break_exit %(pkgdir)/0001-deps-analysis-elves-In-absence-of-soname.-make-one-u.patch";
 
-        let mut parser = Parser::new();
-        parser.add_action(
+        let mut context = ScriptContext::new();
+
+        context.add_action(
             "patch",
             Action {
                 description: "test".into(),
@@ -312,10 +328,11 @@ mod test {
             ("pkgdir", "%(root)/pkg"),
             ("root", "/mason"),
         ] {
-            parser.add_definition(id, definition);
+            context.add_definition(id, definition);
         }
 
-        let script = parser.parse(input).unwrap();
+        let parser = Parser::new();
+        let script = parser.parse(&context, input).unwrap();
 
         assert_eq!(
             script.commands,
@@ -341,7 +358,11 @@ mod test {
     fn break_line_num() {
         let test = "patch (pkgdir)/security/CVE-2022-47016.patch\n%break_continue\nconfigure";
 
-        let breakpoint = Parser::new().parse(test).unwrap().commands.remove(1);
+        let breakpoint = Parser::new()
+            .parse(&ScriptContext::new(), test)
+            .unwrap()
+            .commands
+            .remove(1);
 
         assert_eq!(
             breakpoint,
@@ -353,8 +374,9 @@ mod test {
 
         let test = "# Currently the emul32 chain for harfbuzz is on the large side. Revisit\n%meson -Dharfbuzz=disabled\n%break_continue";
 
-        let mut parser = Parser::new();
-        parser.add_action(
+        let mut context = ScriptContext::new();
+
+        context.add_action(
             "meson",
             Action {
                 description: "test".into(),
@@ -363,7 +385,9 @@ mod test {
                 dependencies: vec![],
             },
         );
-        let breakpoint = parser.parse(test).unwrap().commands.remove(1);
+
+        let parser = Parser::new();
+        let breakpoint = parser.parse(&context, test).unwrap().commands.remove(1);
 
         assert_eq!(
             breakpoint,

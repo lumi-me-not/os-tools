@@ -119,10 +119,13 @@ fn resolve_packages(
     recipe: &Recipe,
     collector: &mut Collector,
 ) -> Result<BTreeMap<String, Package>, Error> {
-    let mut parser = script::Parser::new();
-    parser.add_definition("name", &recipe.parsed.source.name);
-    parser.add_definition("version", &recipe.parsed.source.version);
-    parser.add_definition("release", recipe.parsed.source.release);
+    let mut context = script::ScriptContext::new();
+
+    context.add_definition("name", &recipe.parsed.source.name);
+    context.add_definition("version", &recipe.parsed.source.version);
+    context.add_definition("release", recipe.parsed.source.release);
+
+    let parser = script::Parser::new();
 
     let mut packages = BTreeMap::new();
 
@@ -131,32 +134,32 @@ fn resolve_packages(
     // If a name collision occurs, merge the incoming and stored
     // packages
     let mut add_package = |mut name: String, mut package: Package| {
-        name = parser.parse_content(&name)?;
+        name = parser.parse_content(&context, &name)?;
 
         package.summary = package
             .summary
             .as_ref()
             .or(recipe.parsed.package.summary.as_ref())
-            .map(|summary| parser.parse_content(summary))
+            .map(|summary| parser.parse_content(&context, summary))
             .transpose()?;
         package.description = package
             .description
             .as_ref()
             .or(recipe.parsed.package.description.as_ref())
-            .map(|description| parser.parse_content(description))
+            .map(|description| parser.parse_content(&context, description))
             .transpose()?;
         package.provides_exclude = package.provides_exclude.into_iter().collect();
         package.run_deps = package
             .run_deps
             .into_iter()
-            .map(|dep| parser.parse_content(&dep))
+            .map(|dep| parser.parse_content(&context, &dep))
             .collect::<Result<_, _>>()?;
         package.run_deps_exclude = package.run_deps_exclude.into_iter().collect();
         package.paths = package
             .paths
             .into_iter()
             .map(|mut path| {
-                path.path = parser.parse_content(&path.path)?;
+                path.path = parser.parse_content(&context, &path.path)?;
                 Ok(path)
             })
             .collect::<Result<_, Error>>()?;
